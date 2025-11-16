@@ -5,13 +5,13 @@ import pandas as pd
 import numpy as np
 
 
-def read_file(path):
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".xlsx", ".xls"):
-        return pd.read_excel(path)
-    if ext == ".csv":
-        return pd.read_csv(path)
-    return pd.DataFrame()
+# -----------------------------
+# Safe helper functions
+# -----------------------------
+
+def safe_get(df, col):
+    """Return df[col] or a Series of NaN if missing."""
+    return df[col] if col in df.columns else pd.Series([None] * len(df))
 
 
 def normalize_colname(name):
@@ -19,78 +19,77 @@ def normalize_colname(name):
 
 
 def detect_latlon(df):
-    lat_candidates = ["lat", "latitude", "gps_lat", "y_coord"]
-    lon_candidates = ["lon", "lng", "longitude", "gps_lon", "x_coord"]
+    """Auto-detect latitude/longitude columns safely."""
+    lat_patterns = ["lat", "latitude", "gps_lat", "y_coord"]
+    lon_patterns = ["lon", "lng", "longitude", "gps_lon", "x_coord"]
 
-    lat = next((c for c in df.columns if any(k in c.lower() for k in lat_candidates)), None)
-    lon = next((c for c in df.columns if any(k in c.lower() for k in lon_candidates)), None)
+    lat_col = next((c for c in df.columns if any(p in c.lower() for p in lat_patterns)), None)
+    lon_col = next((c for c in df.columns if any(p in c.lower() for p in lon_patterns)), None)
 
-    if lat and lon:
-        df["latitude_num"] = pd.to_numeric(df[lat], errors="coerce")
-        df["longitude_num"] = pd.to_numeric(df[lon], errors="coerce")
+    if lat_col:
+        df["latitude_num"] = pd.to_numeric(safe_get(df, lat_col), errors="coerce")
+    if lon_col:
+        df["longitude_num"] = pd.to_numeric(safe_get(df, lon_col), errors="coerce")
 
     return df
 
 
 def detect_dates(df):
-    date_cols = ["date", "survey", "interview", "day"]
-    col = next((c for c in df.columns if any(k in c.lower() for k in date_cols)), None)
+    date_patterns = ["date", "survey", "interview", "day"]
+    col = next((c for c in df.columns if any(p in c.lower() for p in date_patterns)), None)
 
     if col:
-        df["survey_date"] = pd.to_datetime(df[col], errors="coerce")
+        s = safe_get(df, col)
+        df["survey_date"] = pd.to_datetime(s, errors="coerce")
         df["survey_month"] = df["survey_date"].dt.to_period("M").astype(str)
 
     return df
 
 
 def detect_numeric_child_age(df):
-    patterns = [
+    age_patterns = [
         "child_age", "childage", "age_child",
         "age_month", "age_in_month", "agemonth", "age_m",
         "kid_age", "kids_age", "ch_age"
     ]
 
-    col = next((c for c in df.columns if any(p in c.lower() for p in patterns)), None)
+    col = next((c for c in df.columns if any(p in c.lower() for p in age_patterns)), None)
 
     if col:
-        df["child_age_num"] = pd.to_numeric(df[col], errors="coerce")
+        df["child_age_num"] = pd.to_numeric(safe_get(df, col), errors="coerce")
 
     return df
 
 
+# -----------------------------
+# Normalization helpers
+# -----------------------------
+
 def _map_yes_no(series):
-    s = series.astype(str).str.strip().str.lower().replace({"nan": None})
+    """Normalize Yes/No fields safely."""
+    s = series.astype(str).str.strip().str.lower()
 
     mapping = {
         "yes": "Yes", "y": "Yes", "1": "Yes", "true": "Yes", "t": "Yes",
         "no": "No", "n": "No", "0": "No", "false": "No", "f": "No"
     }
 
-    out = s.map(mapping)
-
-    if out.isna().all():
-        nums = pd.to_numeric(series, errors="coerce")
-        out = nums.map({1: "Yes", 0: "No"})
-
-    out = out.where(out.notna(), None)
+    out = s.map(mapping).replace({np.nan: None})
     return out
 
 
 def _map_treatment(series):
-    s = series.astype(str).str.strip().str.lower().replace({"nan": None})
+    """Normalize treatment fields safely."""
+    s = series.astype(str).str.strip().str.lower()
 
     mapping = {
-        "1": 1, "treatment": 1, "t": 1, "yes": 1, "true": 1, "y": 1,
-        "0": 0, "control": 0, "c": 0, "no": 0, "false": 0, "n": 0, "f": 0
+        "1": 1, "treatment": 1, "t": 1, "yes": 1, "true": 1,
+        "0": 0, "control": 0, "c": 0, "no": 0, "false": 0
     }
 
     out = s.map(mapping)
-
-    if out.isna().any():
-        nums = pd.to_numeric(series, errors="coerce")
-        out = out.fillna(nums)
-
     out = pd.to_numeric(out, errors="coerce")
+
     return out
 
 
@@ -99,22 +98,19 @@ def detect_categorical_binary(df, patterns, new_name):
     if not col:
         return df
 
-    try:
-        if new_name == "consent_norm":
-            df[new_name] = _map_yes_no(df[col])
-        else:
-            df[new_name] = _map_treatment(df[col])
-    except Exception:
-        try:
-            if new_name == "consent_norm":
-                df[new_name] = _map_yes_no(df[col].astype(str))
-            else:
-                df[new_name] = _map_treatment(df[col].astype(str))
-        except Exception:
-            df[new_name] = pd.Series([None] * len(df), index=df.index)
+    series = safe_get(df, col)
+
+    if new_name == "consent_norm":
+        df[new_name] = _map_yes_no(series)
+    else:
+        df[new_name] = _map_treatment(series)
 
     return df
 
+
+# -----------------------------
+# Standardization pipeline
+# -----------------------------
 
 def standardize_cols(df):
     df = detect_latlon(df)
@@ -122,26 +118,25 @@ def standardize_cols(df):
     df = detect_numeric_child_age(df)
 
     df = detect_categorical_binary(
-        df, patterns=["consent", "consent_final", "consented"], new_name="consent_norm"
+        df, ["consent", "consented", "consent_final"], "consent_norm"
     )
     df = detect_categorical_binary(
-        df, patterns=["treat", "treatment", "treatment_status", "group"], new_name="treatment_norm"
+        df, ["treat", "treatment", "group"], "treatment_norm"
     )
 
     return df
 
 
+# -----------------------------
+# MAIN ENTRY — used by app.py
+# -----------------------------
 def prep_uploaded_files(uploaded_files):
-    """
-    Streamlit version of auto_detect_and_prep("data").
-    Reads uploaded files and applies same preprocessing.
-    """
     frames = []
 
     for file in uploaded_files:
         try:
             df = pd.read_excel(file)
-        except Exception:
+        except:
             try:
                 df = pd.read_csv(file)
             except:
@@ -152,6 +147,7 @@ def prep_uploaded_files(uploaded_files):
 
         df.columns = [normalize_colname(c) for c in df.columns]
         df["_source_file"] = file.name
+
         df = standardize_cols(df)
         frames.append(df)
 
@@ -161,10 +157,12 @@ def prep_uploaded_files(uploaded_files):
     return pd.concat(frames, ignore_index=True)
 
 
+# -----------------------------
+# Column finder
+# -----------------------------
 def find_col(df, mapping):
     for key, patterns in mapping.items():
         for col in df.columns:
-            name = col.lower()
-            if any(p in name for p in patterns):
+            if any(p in col.lower() for p in patterns):
                 return col
     return None
