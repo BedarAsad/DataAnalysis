@@ -25,7 +25,6 @@ Compact, reproducible Streamlit dashboard to preview, filter, visualize, map, an
 - src/
   - app.py        — Streamlit app (UI, filters, visuals, download)
   - utils.py      — data reading, normalization, detection, merge/coalesce helpers
-- data/ (optional) — sample/test files
 - README.md
 - requirements.txt
 
