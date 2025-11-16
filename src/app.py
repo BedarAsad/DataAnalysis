@@ -4,29 +4,32 @@ import numpy as np
 import plotly.express as px
 import pydeck as pdk
 import datetime
+import io  # MODIFICATION: Import for caching download
 
+# --- MODIFICATION: Import the new main function ---
 from utils import (
-    prep_uploaded_files,
+    prep_and_merge_files,  # This is the new function
     find_col
 )
 
 st.set_page_config(layout="wide", page_title="ARCED - Data Preview", page_icon="📊")
 
 st.title("ARCED / NYU — Data Preview Dashboard")
-st.markdown("Upload father/mother datasets to explore, filter, and visualize the data.")
+st.markdown("Upload **father** and **mother** datasets (xlsx or csv) to explore the merged data.")
 
 
 # --------------------------------------------------
 # Upload Section
 # --------------------------------------------------
 uploaded_files = st.file_uploader(
-    "Upload father.xlsx and mother.xlsx (or CSV files). You may upload multiple files.",
+    "Upload father.xlsx and mother.xlsx (or CSV files). Both files are required.",
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True
 )
 
-if not uploaded_files:
-    st.info("Upload files to begin.")
+# --- MODIFICATION: Check for *both* files ---
+if not uploaded_files or len(uploaded_files) < 2:
+    st.info("Please upload both father and mother data files to begin.")
     st.stop()
 
 
@@ -35,20 +38,23 @@ if not uploaded_files:
 # --------------------------------------------------
 @st.cache_data
 def load_data(files):
-    return prep_uploaded_files(files)
+    # --- MODIFICATION: Call the new merge function ---
+    return prep_and_merge_files(files)
 
 df = load_data(uploaded_files)
 
 if df.empty:
-    st.error("Uploaded files contained no readable data.")
+    st.error("Data could not be merged. Ensure 'father' and 'mother' files are uploaded and contain a 'hhid_final' column.")
     st.stop()
 
 
 # --------------------------------------------------
 # Auto-detected fields
 # --------------------------------------------------
-possible_enumerator = find_col(df, {"enumerator": ["enumerator", "enum", "enumerator_name"]})
-possible_upazila = find_col(df, {"upazila": ["upazila", "area", "upazila_name", "upazila_code"]})
+# --- MODIFICATION: Point to the new coalesced columns ---
+possible_enumerator = "enumerator" if "enumerator" in df.columns else None
+possible_upazila = "upazila" if "upazila" in df.columns else None
+possible_hhid = "hhid" if "hhid" in df.columns else None # For map tooltip
 possible_age = "child_age_num" if "child_age_num" in df.columns else None
 possible_date = "survey_month" if "survey_month" in df.columns else None
 
@@ -95,7 +101,9 @@ else:
     selected_consent = None
 
 if treatment_col:
-    treatment_opts = sorted(df[treatment_col].dropna().unique())
+    # --- MODIFICATION: Clean treatment values for filter ---
+    df[treatment_col] = pd.to_numeric(df[treatment_col], errors='coerce')
+    treatment_opts = sorted(df[treatment_col].dropna().astype(int).unique())
     selected_treatment = st.sidebar.multiselect("Treatment (0=Control,1=Treatment)", treatment_opts, default=treatment_opts)
 else:
     selected_treatment = None
@@ -134,7 +142,8 @@ left, right = st.columns([2, 1])
 
 with left:
     st.subheader("Data Preview")
-    st.write(f"Files loaded: {filtered['_source_file'].nunique()} | Rows: {len(filtered)}")
+    # --- MODIFICATION: Updated count message ---
+    st.write(f"Showing **{len(filtered)}** of **{len(df)}** merged households.")
 
     nrows = st.selectbox("Rows to show", [10, 25, 50, 100], index=1)
     st.dataframe(filtered.head(nrows))
@@ -149,32 +158,38 @@ with left:
     y_candidates = [c for c in all_cols if pd.api.types.is_numeric_dtype(filtered[c])]
     y_col = st.selectbox("Y / numeric (for charts)", y_candidates) if y_candidates else None
 
-    plot_type = st.selectbox("Plot type", ["Bar / Count", "Histogram", "Box", "Scatter (X vs Y)"])
+    # --- MODIFICATION: Removed redundant "Histogram" ---
+    plot_type = st.selectbox("Plot type", ["Bar / Count", "Box", "Scatter (X vs Y)"])
 
     if plot_type == "Bar / Count":
         st.plotly_chart(px.histogram(filtered, x=x_col), use_container_width=True)
 
-    elif plot_type == "Histogram" and y_col:
-        st.plotly_chart(px.histogram(filtered, x=y_col, nbins=30), use_container_width=True)
+    # --- MODIFICATION: Add check for y_col ---
+    elif plot_type == "Box":
+        if y_col:
+            st.plotly_chart(px.box(filtered, x=x_col if filtered[x_col].nunique() < 50 else None, y=y_col), use_container_width=True)
+        else:
+            st.info("Please select a 'Y / numeric' field for a Box Plot.")
 
-    elif plot_type == "Box" and y_col:
-        st.plotly_chart(px.box(filtered, x=x_col if filtered[x_col].nunique() < 50 else None, y=y_col), use_container_width=True)
-
-    elif plot_type == "Scatter (X vs Y)" and y_col:
-        st.plotly_chart(px.scatter(filtered, x=x_col, y=y_col, trendline="ols"), use_container_width=True)
+    elif plot_type == "Scatter (X vs Y)":
+        if y_col:
+            st.plotly_chart(px.scatter(filtered, x=x_col, y=y_col, trendline="ols"), use_container_width=True)
+        else:
+            st.info("Please select a 'Y / numeric' field for a Scatter Plot.")
 
     st.markdown("---")
     st.subheader("Summary statistics")
 
+    # --- MODIFICATION: Added check for count() > 0 ---
     if pd.api.types.is_numeric_dtype(filtered[x_col]):
         series = pd.to_numeric(filtered[x_col], errors="coerce")
         stats = {
             "N": int(series.count()),
-            "mean": float(series.mean()) if series.count() else None,
-            "median": float(series.median()) if series.count() else None,
-            "std": float(series.std()) if series.count() else None,
-            "min": float(series.min()) if series.count() else None,
-            "max": float(series.max()) if series.count() else None,
+            "mean": float(series.mean()) if series.count() > 0 else None,
+            "median": float(series.median()) if series.count() > 0 else None,
+            "std": float(series.std()) if series.count() > 0 else None,
+            "min": float(series.min()) if series.count() > 0 else None,
+            "max": float(series.max()) if series.count() > 0 else None,
         }
         st.json(stats)
     else:
@@ -201,22 +216,30 @@ with left:
 # RIGHT COLUMN — Summaries
 # --------------------------------------------------
 with right:
-    st.subheader("Enumerator Summary")
+    # --- MODIFICATION: Title change and use `df` ---
+    st.subheader("Enumerator Summary (All Data)")
 
     if possible_enumerator and consent_col:
-        enum_tab = filtered.groupby(possible_enumerator).agg(
+        # --- MODIFICATION: Use the full `df` not `filtered` ---
+        enum_tab = df.groupby(possible_enumerator).agg(
             total=(consent_col, "count"),
             consent_yes=(consent_col, lambda x: (x == "Yes").sum()),
         )
         enum_tab["consent_rate_pct"] = (enum_tab["consent_yes"] / enum_tab["total"] * 100).round(2)
         enum_tab = enum_tab.sort_values("consent_rate_pct", ascending=False)
-        st.dataframe(enum_tab.head(20))
+        
+        st.write("Top 3 Enumerators:")
+        st.dataframe(enum_tab.head(3))
+        
+        st.write("Full Enumerator List:")
+        st.dataframe(enum_tab.head(20)) # Your original code
     else:
         st.info("Enumerator + consent fields required.")
 
     st.markdown("---")
     st.subheader("Quick stats")
 
+    # --- MODIFICATION: Point to new `_source_file` ---
     for c in ["_source_file", "survey_month", "consent_norm", "treatment_norm"]:
         if c in filtered.columns:
             st.write(f"**{c}**")
@@ -225,6 +248,7 @@ with right:
     st.markdown("---")
     st.subheader("Map of households (by treatment)")
 
+    # --- NO CHANGES MADE TO THIS SECTION ---
     if has_latlon:
         map_df = filtered.dropna(subset=["latitude_num", "longitude_num"]).copy()
 
@@ -278,7 +302,19 @@ with right:
 st.markdown("---")
 st.header("Download filtered data")
 
-csv = filtered.to_csv(index=False).encode("utf-8")
-st.download_button("Download filtered CSV", data=csv, file_name="filtered_data.csv", mime="text/csv")
+# --- MODIFICATION: Add cached function for efficiency ---
+@st.cache_data
+def convert_df_to_csv(df_to_convert):
+    output = io.BytesIO()
+    df_to_convert.to_csv(output, index=False, encoding='utf-8')
+    return output.getvalue()
+
+csv_data = convert_df_to_csv(filtered)
+st.download_button(
+    "Download filtered CSV",
+    data=csv_data,
+    file_name="filtered_data.csv",
+    mime="text/csv"
+)
 
 st.caption("CSV contains processed standardized columns.")
