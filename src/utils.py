@@ -117,12 +117,10 @@ def read_and_prep_file(file):
     df = standardize_cols(df)
     return df
 
-# --- MODIFICATION: New MAIN function called by app.py ---
 def prep_and_merge_files(uploaded_files):
     father_df = None
     mother_df = None
 
-    # 1. Identify father and mother files
     for file in uploaded_files:
         name = file.name.lower()
         if "father" in name:
@@ -131,14 +129,14 @@ def prep_and_merge_files(uploaded_files):
             mother_df = read_and_prep_file(file)
 
     if father_df is None or mother_df is None:
-        return pd.DataFrame() # Return empty if both files aren't present
+        return pd.DataFrame()
 
-    # 2. Find the merge key (must be normalized)
+    
     merge_key = "hhid_final"
     if merge_key not in father_df.columns or merge_key not in mother_df.columns:
-        return pd.DataFrame() # Can't merge
+        return pd.DataFrame() 
 
-    # 3. Merge the dataframes
+    
     df_merged = pd.merge(
         father_df,
         mother_df,
@@ -147,7 +145,6 @@ def prep_and_merge_files(uploaded_files):
         suffixes=("_father", "_mother")
     )
 
-    # 4. Coalesce (combine) key standardized columns
     std_cols = [
         'latitude_num', 'longitude_num', 'survey_date', 'survey_month',
         'child_age_num', 'consent_norm', 'treatment_norm'
@@ -155,21 +152,17 @@ def prep_and_merge_files(uploaded_files):
     for col in std_cols:
         col_f = f"{col}_father"
         col_m = f"{col}_mother"
-        # Use father's value, but fill any missing with mother's value
         df_merged[col] = safe_get(df_merged, col_f).fillna(safe_get(df_merged, col_m))
 
-    # 5. Coalesce other important filterable columns
-    # Enumerator
+
     enum_f = find_col(df_merged, {"enum": ["enumid_r_father", "enumerator_father"]})
     enum_m = find_col(df_merged, {"enum": ["enumid_mother", "enumerator_mother"]})
     df_merged["enumerator"] = safe_get(df_merged, enum_f).fillna(safe_get(df_merged, enum_m))
     
-    # Upazila
     upa_f = find_col(df_merged, {"upa": ["upazila_father"]})
     upa_m = find_col(df_merged, {"upa": ["upazila_mother"]})
     df_merged["upazila"] = safe_get(df_merged, upa_f).fillna(safe_get(df_merged, upa_m))
     
-    # HHID (for tooltip)
     hhid_f = find_col(df_merged, {"hhid": ["unique_id_father", "key_father"]})
     hhid_m = find_col(df_merged, {"hhid": ["unique_id_mother", "key_mother"]})
     df_merged["hhid"] = safe_get(df_merged, hhid_f).fillna(safe_get(df_merged, hhid_m))
@@ -177,9 +170,6 @@ def prep_and_merge_files(uploaded_files):
     return df_merged
 
 
-# -----------------------------
-# Column finder
-# -----------------------------
 def find_col(df, mapping):
     for key, patterns in mapping.items():
         for col in df.columns:
