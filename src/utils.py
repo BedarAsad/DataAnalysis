@@ -1,105 +1,170 @@
+import os
+import re
+from datetime import datetime
 import pandas as pd
+import numpy as np
 
 
-def load_uploaded_data(file):
-    return pd.read_excel(file)
+def read_file(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        return pd.read_excel(path)
+    if ext == ".csv":
+        return pd.read_csv(path)
+    return pd.DataFrame()
 
 
-def preprocess_father_data(df):
-    df = df.copy()
+def normalize_colname(name):
+    return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
-    rename_map = {
-        "Father_Age": "age",
-        "Father_Consent": "consent",
-        "Father_Upazila": "upazila",
-        "Lat": "latitude",
-        "Lon": "longitude",
-        "Child_Age": "child_age",
+
+def detect_latlon(df):
+    lat_candidates = ["lat", "latitude", "gps_lat", "y_coord"]
+    lon_candidates = ["lon", "lng", "longitude", "gps_lon", "x_coord"]
+
+    lat = next((c for c in df.columns if any(k in c.lower() for k in lat_candidates)), None)
+    lon = next((c for c in df.columns if any(k in c.lower() for k in lon_candidates)), None)
+
+    if lat and lon:
+        df["latitude_num"] = pd.to_numeric(df[lat], errors="coerce")
+        df["longitude_num"] = pd.to_numeric(df[lon], errors="coerce")
+
+    return df
+
+
+def detect_dates(df):
+    date_cols = ["date", "survey", "interview", "day"]
+    col = next((c for c in df.columns if any(k in c.lower() for k in date_cols)), None)
+
+    if col:
+        df["survey_date"] = pd.to_datetime(df[col], errors="coerce")
+        df["survey_month"] = df["survey_date"].dt.to_period("M").astype(str)
+
+    return df
+
+
+def detect_numeric_child_age(df):
+    patterns = [
+        "child_age", "childage", "age_child",
+        "age_month", "age_in_month", "agemonth", "age_m",
+        "kid_age", "kids_age", "ch_age"
+    ]
+
+    col = next((c for c in df.columns if any(p in c.lower() for p in patterns)), None)
+
+    if col:
+        df["child_age_num"] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
+def _map_yes_no(series):
+    s = series.astype(str).str.strip().str.lower().replace({"nan": None})
+
+    mapping = {
+        "yes": "Yes", "y": "Yes", "1": "Yes", "true": "Yes", "t": "Yes",
+        "no": "No", "n": "No", "0": "No", "false": "No", "f": "No"
     }
 
-    df.rename(columns=rename_map, inplace=True)
+    out = s.map(mapping)
 
-    df["consent"] = normalize_consent(df["consent"])
-    df["latitude"] = safe_float(df["latitude"])
-    df["longitude"] = safe_float(df["longitude"])
+    if out.isna().all():
+        nums = pd.to_numeric(series, errors="coerce")
+        out = nums.map({1: "Yes", 0: "No"})
 
-    return df
+    out = out.where(out.notna(), None)
+    return out
 
 
-def preprocess_mother_data(df):
-    df = df.copy()
+def _map_treatment(series):
+    s = series.astype(str).str.strip().str.lower().replace({"nan": None})
 
-    rename_map = {
-        "Mother_Age": "age",
-        "Mother_Consent": "consent",
-        "Mother_Upazila": "upazila",
-        "Lat": "latitude",
-        "Lon": "longitude",
-        "Child_Age": "child_age",
+    mapping = {
+        "1": 1, "treatment": 1, "t": 1, "yes": 1, "true": 1, "y": 1,
+        "0": 0, "control": 0, "c": 0, "no": 0, "false": 0, "n": 0, "f": 0
     }
 
-    df.rename(columns=rename_map, inplace=True)
+    out = s.map(mapping)
 
-    df["consent"] = normalize_consent(df["consent"])
-    df["latitude"] = safe_float(df["latitude"])
-    df["longitude"] = safe_float(df["longitude"])
+    if out.isna().any():
+        nums = pd.to_numeric(series, errors="coerce")
+        out = out.fillna(nums)
+
+    out = pd.to_numeric(out, errors="coerce")
+    return out
+
+
+def detect_categorical_binary(df, patterns, new_name):
+    col = next((c for c in df.columns if any(p in c.lower() for p in patterns)), None)
+    if not col:
+        return df
+
+    try:
+        if new_name == "consent_norm":
+            df[new_name] = _map_yes_no(df[col])
+        else:
+            df[new_name] = _map_treatment(df[col])
+    except Exception:
+        try:
+            if new_name == "consent_norm":
+                df[new_name] = _map_yes_no(df[col].astype(str))
+            else:
+                df[new_name] = _map_treatment(df[col].astype(str))
+        except Exception:
+            df[new_name] = pd.Series([None] * len(df), index=df.index)
 
     return df
 
 
-def normalize_consent(series):
-    yes_values = {"yes", "y", "1", "true", True}
-    no_values = {"no", "n", "0", "false", False}
+def standardize_cols(df):
+    df = detect_latlon(df)
+    df = detect_dates(df)
+    df = detect_numeric_child_age(df)
 
-    def convert(v):
-        if v is None:
-            return None
-        v_str = str(v).strip().lower()
-        if v_str in yes_values:
-            return "Yes"
-        if v_str in no_values:
-            return "No"
-        return None
+    df = detect_categorical_binary(
+        df, patterns=["consent", "consent_final", "consented"], new_name="consent_norm"
+    )
+    df = detect_categorical_binary(
+        df, patterns=["treat", "treatment", "treatment_status", "group"], new_name="treatment_norm"
+    )
 
-    return series.map(convert)
-
-
-def safe_float(series):
-    return pd.to_numeric(series, errors="coerce")
-
-
-def compute_summary(father_df, mother_df):
-    return pd.DataFrame({
-        "Dataset": ["Father", "Mother"],
-        "Total Rows": [len(father_df), len(mother_df)],
-        "Avg Age": [father_df["age"].mean(), mother_df["age"].mean()],
-        "Avg Child Age": [father_df["child_age"].mean(), mother_df["child_age"].mean()],
-    })
-
-
-def compute_comparison(father_df, mother_df, child_age, upazila):
-    f = father_df[(father_df["child_age"] == child_age) & (father_df["upazila"] == upazila)]
-    m = mother_df[(mother_df["child_age"] == child_age) & (mother_df["upazila"] == upazila)]
-
-    if f.empty and m.empty:
-        return None
-
-    return pd.DataFrame({
-        "Metric": ["Count", "Avg Age", "Consent Rate"],
-        "Father": [
-            len(f),
-            f["age"].mean() if not f.empty else None,
-            f["consent"].eq("Yes").mean() if not f.empty else None
-        ],
-        "Mother": [
-            len(m),
-            m["age"].mean() if not m.empty else None,
-            m["consent"].eq("Yes").mean() if not m.empty else None
-        ],
-    })
-
-
-def filter_by_upazila(father_df, mother_df):
-    df = pd.concat([father_df, mother_df], ignore_index=True)
-    df = df.dropna(subset=["latitude", "longitude"])
     return df
+
+
+def prep_uploaded_files(uploaded_files):
+    """
+    Streamlit version of auto_detect_and_prep("data").
+    Reads uploaded files and applies same preprocessing.
+    """
+    frames = []
+
+    for file in uploaded_files:
+        try:
+            df = pd.read_excel(file)
+        except Exception:
+            try:
+                df = pd.read_csv(file)
+            except:
+                continue
+
+        if df.empty:
+            continue
+
+        df.columns = [normalize_colname(c) for c in df.columns]
+        df["_source_file"] = file.name
+        df = standardize_cols(df)
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def find_col(df, mapping):
+    for key, patterns in mapping.items():
+        for col in df.columns:
+            name = col.lower()
+            if any(p in name for p in patterns):
+                return col
+    return None
